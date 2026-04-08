@@ -347,10 +347,7 @@ mod tests {
 
         let div = compare(&pg, &target, &sample_ops()).unwrap();
         assert_eq!(div.index, 0); // First message differs
-        assert!(matches!(
-            &div.expected,
-            Some(NormalizedMsg::ParseComplete)
-        ));
+        assert!(matches!(&div.expected, Some(NormalizedMsg::ParseComplete)));
         assert!(matches!(
             &div.actual,
             Some(NormalizedMsg::ErrorResponse { .. })
@@ -439,10 +436,7 @@ mod tests {
             msg::empty_query_response(),
             msg::ready_for_query(b'I'),
         ]);
-        let target = make_events(vec![
-            msg::portal_suspended(),
-            msg::ready_for_query(b'I'),
-        ]);
+        let target = make_events(vec![msg::portal_suspended(), msg::ready_for_query(b'I')]);
         let div = compare(&pg, &target, &sample_ops()).unwrap();
         assert_eq!(div.index, 0);
     }

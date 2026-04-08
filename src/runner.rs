@@ -1,9 +1,9 @@
 use std::io;
 use std::time::Duration;
 
+use pg_stream::PgMessage;
 use pg_stream::connection::PgConnection;
 use pg_stream::message::{Bindable, PgProtocol};
-use pg_stream::PgMessage;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::connection::ConnectionFactory;
@@ -22,10 +22,7 @@ pub enum ResponseEvent {
 
 /// Encode a single FrontendOp into the connection's write buffer.
 /// Does NOT flush — the caller decides when to flush based on `triggers_flush()`.
-pub fn encode_op<S: AsyncRead + AsyncWrite + Unpin>(
-    conn: &mut PgConnection<S>,
-    op: &FrontendOp,
-) {
+pub fn encode_op<S: AsyncRead + AsyncWrite + Unpin>(conn: &mut PgConnection<S>, op: &FrontendOp) {
     match op {
         FrontendOp::Query { sql } => {
             conn.query(sql);
@@ -107,7 +104,9 @@ pub async fn run_sequence<S: AsyncRead + AsyncWrite + Unpin>(
     // Encode all ops, flushing the TCP stream at each flush point.
     for op in ops {
         encode_op(conn, op);
-        if op.triggers_flush() && let Err(e) = conn.flush().await {
+        if op.triggers_flush()
+            && let Err(e) = conn.flush().await
+        {
             return vec![ResponseEvent::Disconnected(e.to_string())];
         }
     }
@@ -180,7 +179,7 @@ async fn run_setup<S: AsyncRead + AsyncWrite + Unpin>(
     timeout: Duration,
 ) -> io::Result<()> {
     for stmt in setup_stmts {
-        conn.query(stmt).sync();
+        conn.query(stmt);
         conn.flush().await?;
         // Drain until ReadyForQuery
         loop {
@@ -192,7 +191,7 @@ async fn run_setup<S: AsyncRead + AsyncWrite + Unpin>(
                     return Err(io::Error::new(
                         io::ErrorKind::TimedOut,
                         format!("timeout during setup: {stmt}"),
-                    ))
+                    ));
                 }
             }
         }
@@ -605,8 +604,26 @@ mod tests {
 
         assert_eq!(pg.len(), 5);
         assert_eq!(target.len(), 5);
-        assert_message_types(&pg, &["ParseComplete", "BindComplete", "DataRow", "CommandComplete", "ReadyForQuery"]);
-        assert_message_types(&target, &["ParseComplete", "BindComplete", "DataRow", "CommandComplete", "ReadyForQuery"]);
+        assert_message_types(
+            &pg,
+            &[
+                "ParseComplete",
+                "BindComplete",
+                "DataRow",
+                "CommandComplete",
+                "ReadyForQuery",
+            ],
+        );
+        assert_message_types(
+            &target,
+            &[
+                "ParseComplete",
+                "BindComplete",
+                "DataRow",
+                "CommandComplete",
+                "ReadyForQuery",
+            ],
+        );
     }
 
     #[tokio::test]
@@ -690,9 +707,7 @@ mod tests {
             MockConnectionFactory { response_bytes },
             TIMEOUT,
         )
-        .with_setup(vec![
-            "CREATE TABLE IF NOT EXISTS copy_test (id int)".into(),
-        ]);
+        .with_setup(vec!["CREATE TABLE IF NOT EXISTS copy_test (id int)".into()]);
 
         let ops = vec![
             FrontendOp::Parse {

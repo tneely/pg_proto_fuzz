@@ -6,11 +6,7 @@ use crate::template::{Affinity, SqlEntry, enabled_templates};
 
 /// A generation strategy produces a single op sequence.
 pub trait Strategy {
-    fn generate(
-        &mut self,
-        templates: &[&SqlEntry],
-        rng: &mut impl Rng,
-    ) -> Vec<FrontendOp>;
+    fn generate(&mut self, templates: &[&SqlEntry], rng: &mut impl Rng) -> Vec<FrontendOp>;
 }
 
 /// The generator holds the profile, filtered templates, and strategies.
@@ -51,11 +47,7 @@ impl Generator {
 pub struct RandomStrategy;
 
 impl Strategy for RandomStrategy {
-    fn generate(
-        &mut self,
-        templates: &[&SqlEntry],
-        rng: &mut impl Rng,
-    ) -> Vec<FrontendOp> {
+    fn generate(&mut self, templates: &[&SqlEntry], rng: &mut impl Rng) -> Vec<FrontendOp> {
         // Geometric distribution for length: each op has 12% chance of being the last
         let len = 1 + geometric(rng, 0.12, 30);
         let mut ops = Vec::with_capacity(len);
@@ -63,7 +55,10 @@ impl Strategy for RandomStrategy {
             ops.push(random_op(templates, rng));
         }
         // Always end with Sync so we get a ReadyForQuery to collect
-        if !ops.iter().any(|op| matches!(op, FrontendOp::Sync | FrontendOp::Query { .. })) {
+        if !ops
+            .iter()
+            .any(|op| matches!(op, FrontendOp::Sync | FrontendOp::Query { .. }))
+        {
             ops.push(FrontendOp::Sync);
         }
         ops
@@ -115,11 +110,7 @@ enum ProtoState {
 }
 
 impl Strategy for GrammarStrategy {
-    fn generate(
-        &mut self,
-        templates: &[&SqlEntry],
-        rng: &mut impl Rng,
-    ) -> Vec<FrontendOp> {
+    fn generate(&mut self, templates: &[&SqlEntry], rng: &mut impl Rng) -> Vec<FrontendOp> {
         let len = 2 + geometric(rng, 0.10, 25);
         let mut ops = Vec::with_capacity(len);
         let mut state = ProtoState::Idle;
@@ -143,7 +134,9 @@ impl Strategy for GrammarStrategy {
                         // Start a COPY-in sequence via simple query
                         let tmpl = templates
                             .iter()
-                            .find(|t| t.sql.contains("FROM STDIN") && t.affinity == Affinity::Simple)
+                            .find(|t| {
+                                t.sql.contains("FROM STDIN") && t.affinity == Affinity::Simple
+                            })
                             .unwrap();
                         state = ProtoState::CopyIn;
                         FrontendOp::Query {
@@ -308,7 +301,11 @@ fn random_bind(templates: &[&SqlEntry], rng: &mut impl Rng) -> FrontendOp {
 fn random_execute(rng: &mut impl Rng) -> FrontendOp {
     FrontendOp::Execute {
         portal: random_portal_name(rng),
-        max_rows: if rng.random_bool(0.8) { 0 } else { rng.random_range(1..10) },
+        max_rows: if rng.random_bool(0.8) {
+            0
+        } else {
+            rng.random_range(1..10)
+        },
     }
 }
 
@@ -322,8 +319,8 @@ fn random_query(templates: &[&SqlEntry], rng: &mut impl Rng) -> FrontendOp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
     use rand::SeedableRng;
+    use std::collections::HashSet;
 
     #[test]
     fn test_random_strategy_produces_ops() {
@@ -335,9 +332,10 @@ mod tests {
         let ops = strategy.generate(&templates, &mut rng);
         assert!(!ops.is_empty());
         // Must end with at least one Sync or Query
-        assert!(ops
-            .iter()
-            .any(|op| matches!(op, FrontendOp::Sync | FrontendOp::Query { .. })));
+        assert!(
+            ops.iter()
+                .any(|op| matches!(op, FrontendOp::Sync | FrontendOp::Query { .. }))
+        );
     }
 
     #[test]
@@ -349,9 +347,10 @@ mod tests {
 
         let ops = strategy.generate(&templates, &mut rng);
         assert!(!ops.is_empty());
-        assert!(ops
-            .iter()
-            .any(|op| matches!(op, FrontendOp::Sync | FrontendOp::Query { .. })));
+        assert!(
+            ops.iter()
+                .any(|op| matches!(op, FrontendOp::Sync | FrontendOp::Query { .. }))
+        );
     }
 
     #[test]

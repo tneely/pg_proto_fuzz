@@ -128,7 +128,9 @@ fn hex(bytes: &[u8]) -> String {
 #[derive(Debug, Clone, PartialEq)]
 pub enum FrontendOp {
     // Simple query protocol
-    Query { sql: String },
+    Query {
+        sql: String,
+    },
 
     // Extended query protocol
     Parse {
@@ -161,9 +163,13 @@ pub enum FrontendOp {
     Flush,
 
     // COPY sub-protocol
-    CopyData { data: Vec<u8> },
+    CopyData {
+        data: Vec<u8>,
+    },
     CopyDone,
-    CopyFail { message: String },
+    CopyFail {
+        message: String,
+    },
 
     // Other
     Terminate,

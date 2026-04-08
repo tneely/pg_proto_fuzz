@@ -6,8 +6,11 @@ mod mock;
 mod op;
 mod profile;
 mod runner;
+mod shrinker;
 mod template;
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use clap::Parser;
@@ -15,6 +18,8 @@ use connection::TcpConnectionFactory;
 use generator::Generator;
 use profile::FuzzProfile;
 use runner::DualRunner;
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 
 #[derive(Parser)]
 #[command(name = "pg_proto_fuzz", about = "Postgres wire protocol fuzzer")]
@@ -82,6 +87,10 @@ struct Cli {
     /// Per-response-collection timeout in milliseconds
     #[arg(long, default_value_t = 2000)]
     timeout: u64,
+
+    /// Number of parallel workers
+    #[arg(long, default_value_t = 10)]
+    workers: usize,
 }
 
 fn parse_profile(name: &str) -> FuzzProfile {
@@ -90,7 +99,7 @@ fn parse_profile(name: &str) -> FuzzProfile {
         "standard" => FuzzProfile::standard(),
         "full" => FuzzProfile::full(),
         other => {
-            eprintln!("Unknown profile: {other}. Using 'minimal'.");
+            tracing::warn!("Unknown profile: {other}. Using 'minimal'.");
             FuzzProfile::minimal()
         }
     }
@@ -98,6 +107,8 @@ fn parse_profile(name: &str) -> FuzzProfile {
 
 #[tokio::main]
 async fn main() {
+    tracing_subscriber::fmt::init();
+
     let cli = Cli::parse();
 
     let seed = cli.seed.unwrap_or_else(|| {
@@ -111,7 +122,9 @@ async fn main() {
     let target_port = cli.target_port.unwrap_or(cli.pg_port);
     let target_user = cli.target_user.unwrap_or_else(|| cli.pg_user.clone());
     let target_password = cli.target_password.or_else(|| cli.pg_password.clone());
-    let target_database = cli.target_database.unwrap_or_else(|| cli.pg_database.clone());
+    let target_database = cli
+        .target_database
+        .unwrap_or_else(|| cli.pg_database.clone());
 
     let mut profile = parse_profile(&cli.profile);
     for tag in &cli.enable {
@@ -124,14 +137,16 @@ async fn main() {
 
     let timeout = Duration::from_millis(cli.timeout);
 
-    eprintln!("pg_proto_fuzz");
-    eprintln!("  oracle:     {}@{}:{}/{}", cli.pg_user, cli.pg_host, cli.pg_port, cli.pg_database);
-    eprintln!("  target:     {target_user}@{target_host}:{target_port}/{target_database}");
-    eprintln!("  iterations: {}", cli.iterations);
-    eprintln!("  seed:       {seed}");
-    eprintln!("  profile:    {}", cli.profile);
-    eprintln!("  timeout:    {}ms", cli.timeout);
-    eprintln!();
+    tracing::info!(
+        oracle = %format_args!("{}@{}:{}/{}", cli.pg_user, cli.pg_host, cli.pg_port, cli.pg_database),
+        target = %format_args!("{target_user}@{target_host}:{target_port}/{target_database}"),
+        iterations = cli.iterations,
+        seed,
+        profile = %cli.profile,
+        timeout_ms = cli.timeout,
+        workers = cli.workers,
+        "pg_proto_fuzz starting",
+    );
 
     let pg_factory = TcpConnectionFactory {
         host: cli.pg_host,
@@ -153,47 +168,91 @@ async fn main() {
         .map(|s| s.to_string())
         .collect();
 
-    let dual_runner = DualRunner::new(pg_factory, target_factory, timeout).with_setup(setup_stmts);
+    let dual_runner =
+        Arc::new(DualRunner::new(pg_factory, target_factory, timeout).with_setup(setup_stmts));
 
     let mut generator = Generator::new(&profile, seed);
-    let mut divergence_count = 0;
+    let divergence_count = Arc::new(AtomicUsize::new(0));
+    let completed_count = Arc::new(AtomicUsize::new(0));
+    let semaphore = Arc::new(Semaphore::new(cli.workers));
     let start = Instant::now();
+    let total = cli.iterations;
 
-    for i in 0..cli.iterations {
+    let mut join_set = JoinSet::new();
+
+    for i in 0..total {
+        // Generate ops sequentially to preserve seed reproducibility
         let ops = generator.next();
 
-        match dual_runner.run(&ops).await {
-            Ok((pg_resp, target_resp)) => {
-                if let Some(div) = comparator::compare(&pg_resp, &target_resp, &ops) {
-                    divergence_count += 1;
-                    eprintln!("DIVERGENCE #{divergence_count}");
-                    eprint!("{div}");
-                    eprintln!();
+        // Acquire permit before spawning (backpressure when all workers busy)
+        let permit = semaphore.clone().acquire_owned().await.unwrap();
+        let runner = dual_runner.clone();
+        let div_count = divergence_count.clone();
+        let done_count = completed_count.clone();
+
+        join_set.spawn(async move {
+            let _permit = permit;
+
+            match runner.run(&ops).await {
+                Ok((pg_resp, target_resp)) => {
+                    if let Some(div) = comparator::compare(&pg_resp, &target_resp, &ops) {
+                        let count = div_count.fetch_add(1, Ordering::Relaxed) + 1;
+                        let original_len = ops.len();
+                        let shrunk_ops = shrinker::shrink(&ops, &div, &runner).await;
+
+                        // Re-run the shrunk sequence to get a clean divergence report
+                        if let Ok((pg2, t2)) = runner.run(&shrunk_ops).await
+                            && let Some(shrunk_div) = comparator::compare(&pg2, &t2, &shrunk_ops)
+                        {
+                            tracing::warn!(
+                                count,
+                                original_ops = original_len,
+                                shrunk_ops = shrunk_ops.len(),
+                                "DIVERGENCE (shrunk {original_len} -> {} ops)\n{shrunk_div}",
+                                shrunk_ops.len(),
+                            );
+                        } else {
+                            // Shrunk sequence didn't reproduce — report original
+                            tracing::warn!(count, "DIVERGENCE\n{div}");
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(iteration = i, "connection error: {e}");
                 }
             }
-            Err(e) => {
-                eprintln!("[{i}] connection error: {e}");
-            }
-        }
 
-        if (i + 1) % 100 == 0 || i + 1 == cli.iterations {
-            let elapsed = start.elapsed().as_secs_f64();
-            let rate = (i + 1) as f64 / elapsed;
-            eprint!(
-                "\r  [{}/{}] {:.0} iter/s, {} divergences found",
-                i + 1,
-                cli.iterations,
-                rate,
-                divergence_count
-            );
+            let done = done_count.fetch_add(1, Ordering::Relaxed) + 1;
+            if done.is_multiple_of(100) || done == total {
+                let elapsed = start.elapsed().as_secs_f64();
+                let rate = done as f64 / elapsed;
+                let divs = div_count.load(Ordering::Relaxed);
+                tracing::info!(
+                    progress = %format_args!("{done}/{total}"),
+                    rate = %format_args!("{rate:.0}"),
+                    divergences = divs,
+                    "progress",
+                );
+            }
+        });
+    }
+
+    // Wait for all workers to finish
+    while let Some(result) = join_set.join_next().await {
+        if let Err(e) = result {
+            tracing::error!("worker panic: {e}");
         }
     }
 
-    eprintln!();
-    eprintln!();
-    eprintln!("Done. {} iterations, {divergence_count} divergences, seed={seed}", cli.iterations);
+    let divergence_total = divergence_count.load(Ordering::Relaxed);
+    tracing::info!(
+        iterations = total,
+        divergences = divergence_total,
+        seed,
+        "done",
+    );
 
-    if divergence_count > 0 {
+    if divergence_total > 0 {
         std::process::exit(1);
     }
 }
