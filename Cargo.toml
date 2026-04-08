@@ -1,0 +1,11 @@
+[package]
+name = "pg_proto_fuzz"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+pg_stream = "0.2.0"
+tokio = { version = "1", features = ["full"] }
+bytes = "1"
+rand = "0.9"
+clap = { version = "4", features = ["derive"] }
