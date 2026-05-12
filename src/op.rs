@@ -170,9 +170,6 @@ pub enum FrontendOp {
     CopyFail {
         message: String,
     },
-
-    // Other
-    Terminate,
 }
 
 impl fmt::Display for FrontendOp {
@@ -232,7 +229,6 @@ impl fmt::Display for FrontendOp {
             FrontendOp::CopyFail { message } => {
                 write!(f, "CopyFail {{ \"{message}\" }}")
             }
-            FrontendOp::Terminate => write!(f, "Terminate"),
         }
     }
 }
@@ -248,7 +244,6 @@ impl FrontendOp {
                 | FrontendOp::Flush
                 | FrontendOp::CopyDone
                 | FrontendOp::CopyFail { .. }
-                | FrontendOp::Terminate
         )
     }
 }

@@ -80,9 +80,6 @@ pub fn encode_op<S: AsyncRead + AsyncWrite + Unpin>(conn: &mut PgConnection<S>, 
         FrontendOp::CopyFail { message } => {
             conn.copy_fail(message);
         }
-        FrontendOp::Terminate => {
-            conn.terminate();
-        }
     }
 }
 
@@ -98,8 +95,6 @@ pub async fn run_sequence<S: AsyncRead + AsyncWrite + Unpin>(
         .iter()
         .filter(|op| matches!(op, FrontendOp::Sync | FrontendOp::Query { .. }))
         .count();
-
-    let has_terminate = ops.iter().any(|op| matches!(op, FrontendOp::Terminate));
 
     // Encode all ops, flushing the TCP stream at each flush point.
     for op in ops {
@@ -120,7 +115,7 @@ pub async fn run_sequence<S: AsyncRead + AsyncWrite + Unpin>(
     }
 
     // Collect responses.
-    collect_responses(conn, expected_rfq, has_terminate, timeout).await
+    collect_responses(conn, expected_rfq, timeout).await
 }
 
 /// Read response messages from the connection until we've seen the expected number
@@ -128,16 +123,14 @@ pub async fn run_sequence<S: AsyncRead + AsyncWrite + Unpin>(
 async fn collect_responses<S: AsyncRead + AsyncWrite + Unpin>(
     conn: &mut PgConnection<S>,
     expected_rfq: usize,
-    has_terminate: bool,
     timeout: Duration,
 ) -> Vec<ResponseEvent> {
     let mut responses = Vec::new();
     let mut rfq_count = 0;
 
-    // If the sequence had a Terminate, the server will close the connection.
     // If there are no Sync/Query ops, there's no ReadyForQuery to wait for —
     // just drain whatever arrives within the timeout.
-    let expecting_rfq = expected_rfq > 0 && !has_terminate;
+    let expecting_rfq = expected_rfq > 0;
 
     loop {
         match tokio::time::timeout(timeout, conn.recv()).await {
@@ -151,11 +144,8 @@ async fn collect_responses<S: AsyncRead + AsyncWrite + Unpin>(
                 }
             }
             Ok(Err(e)) => {
-                // Connection closed or I/O error. If we already have some responses
-                // this might be expected (e.g., after Terminate).
-                if !has_terminate || responses.is_empty() {
-                    responses.push(ResponseEvent::Disconnected(e.to_string()));
-                }
+                // Connection closed or I/O error.
+                responses.push(ResponseEvent::Disconnected(e.to_string()));
                 break;
             }
             Err(_) => {
@@ -513,8 +503,7 @@ mod tests {
 
         // No Sync/Query means expected_rfq = 0, so we don't expect ReadyForQuery.
         // The mock EOF will cause a disconnect during the drain.
-        // With no expected RFQ and a has_terminate=false, the collector drains until
-        // EOF or timeout. EOF on empty mock → Disconnected.
+        // EOF on empty mock → Disconnected.
         assert!(responses.len() <= 1);
     }
 

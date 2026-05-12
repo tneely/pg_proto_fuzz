@@ -87,9 +87,8 @@ fn random_op(templates: &[&SqlEntry], rng: &mut impl Rng) -> FrontendOp {
         86..93 => FrontendOp::ClosePortal {
             name: random_portal_name(rng),
         },
-        93..97 => FrontendOp::Flush,
-        97..99 => FrontendOp::CopyDone, // will usually be out of context — that's fine
-        99..100 => FrontendOp::Terminate,
+        93..98 => FrontendOp::Flush,
+        98..100 => FrontendOp::CopyDone, // will usually be out of context — that's fine
         _ => FrontendOp::Sync,
     }
 }
@@ -423,7 +422,6 @@ mod tests {
                     FrontendOp::CopyData { .. } => "CopyData",
                     FrontendOp::CopyDone => "CopyDone",
                     FrontendOp::CopyFail { .. } => "CopyFail",
-                    FrontendOp::Terminate => "Terminate",
                 };
                 op_kinds.insert(kind);
             }
